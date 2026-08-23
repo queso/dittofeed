@@ -14,6 +14,7 @@ import {
   EmailProviderType,
   EventType,
   InternalEventType,
+  MessageMetadataFields,
   ResendEvent,
   ResendEventType,
 } from "../types";
@@ -47,6 +48,94 @@ const sendMailWrapper = async (
   return response;
 };
 
+/**
+ * Resend restricts tag names and values to ASCII letters, digits, underscores
+ * and dashes, with a 256 character maximum:
+ * https://resend.com/docs/api-reference/emails/send-email
+ *
+ * Dittofeed's message tags carry `userId`, which is an arbitrary
+ * caller-supplied string. Email addresses are a common choice, and they fail
+ * that validation, which makes every send for those users fail.
+ *
+ * The encoding below is identity-preserving: a value that already satisfies
+ * Resend's charset is passed through byte for byte. That property is load
+ * bearing in two places. `webhooksController` reads `tags.workspaceId` off the
+ * raw webhook payload before any decoding happens, and webhooks that arrive
+ * for messages sent before this change still need to decode correctly.
+ *
+ * Values that do need escaping are base64url encoded behind a sentinel prefix,
+ * which is itself within the permitted charset.
+ */
+const RESEND_TAG_ENCODING_PREFIX = "dfb64-";
+const RESEND_TAG_SAFE_PATTERN = /^[A-Za-z0-9_-]*$/;
+const RESEND_TAG_MAX_LENGTH = 256;
+
+export function encodeResendTagValue(value: string): string {
+  if (
+    RESEND_TAG_SAFE_PATTERN.test(value) &&
+    !value.startsWith(RESEND_TAG_ENCODING_PREFIX)
+  ) {
+    return value;
+  }
+  return (
+    RESEND_TAG_ENCODING_PREFIX +
+    Buffer.from(value, "utf8").toString("base64url")
+  );
+}
+
+export function decodeResendTagValue(value: string): string {
+  if (!value.startsWith(RESEND_TAG_ENCODING_PREFIX)) {
+    return value;
+  }
+  return Buffer.from(
+    value.slice(RESEND_TAG_ENCODING_PREFIX.length),
+    "base64url",
+  ).toString("utf8");
+}
+
+/**
+ * Builds the `tags` array for a Resend send, encoding values that fall outside
+ * Resend's permitted charset. Tags that cannot be represented are dropped with
+ * a warning rather than failing the send, since losing attribution for one
+ * message is preferable to not delivering it at all.
+ */
+export function encodeResendTags(
+  messageTags: Record<string, string>,
+): { name: string; value: string }[] {
+  return Object.entries(messageTags).flatMap(([name, value]) => {
+    if (
+      !RESEND_TAG_SAFE_PATTERN.test(name) ||
+      name.length > RESEND_TAG_MAX_LENGTH
+    ) {
+      logger().warn(
+        { name },
+        "Dropping Resend tag whose name is outside the permitted charset.",
+      );
+      return [];
+    }
+    const encodedValue = encodeResendTagValue(value);
+    if (encodedValue.length > RESEND_TAG_MAX_LENGTH) {
+      logger().warn(
+        { name, encodedLength: encodedValue.length },
+        "Dropping Resend tag whose encoded value exceeds the length limit.",
+      );
+      return [];
+    }
+    return [{ name, value: encodedValue }];
+  });
+}
+
+function decodeResendTags(tags: MessageMetadataFields): MessageMetadataFields {
+  const decoded: MessageMetadataFields = {};
+  for (const field of MESSAGE_METADATA_FIELDS) {
+    const value = tags[field];
+    if (value !== undefined) {
+      decoded[field] = decodeResendTagValue(value);
+    }
+  }
+  return decoded;
+}
+
 export async function sendMail({
   apiKey,
   mailData,
@@ -74,7 +163,9 @@ export function resendEventToDF({
   // eslint-disable-next-line @typescript-eslint/no-non-null-assertion
   const email = to[0]!;
 
-  const { userId } = resendEvent.data.tags;
+  const tags = decodeResendTags(resendEvent.data.tags);
+
+  const { userId } = tags;
   if (!userId) {
     return err(new Error("Missing userId or anonymousId."));
   }
@@ -108,7 +199,7 @@ export function resendEventToDF({
   const timestamp = new Date(created_at).toISOString();
   const properties: Record<string, string> = R.merge(
     { email },
-    R.pick(resendEvent.data.tags, MESSAGE_METADATA_FIELDS),
+    R.pick(tags, MESSAGE_METADATA_FIELDS),
   );
   let item: BatchTrackData;
   if (userId) {
