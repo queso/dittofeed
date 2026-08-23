@@ -25,6 +25,7 @@ import { validate as validateUuid } from "uuid";
 
 import { submitBatch } from "./apps/batch";
 import { getObject, storage } from "./blobStorage";
+import config from "./config";
 import { MESSAGE_METADATA_FIELDS } from "./constants";
 import { db, TxQueryError, txQueryResult } from "./db";
 import {
@@ -45,6 +46,7 @@ import {
 import { sendMail as sendMailMailchimp } from "./destinations/mailchimp";
 import { sendMail as sendMailPostMark } from "./destinations/postmark";
 import {
+  encodeResendTags,
   ResendRequiredData,
   sendMail as sendMailResend,
 } from "./destinations/resend";
@@ -64,9 +66,7 @@ import {
   sendGmailEmail,
   SendGmailEmailParams,
 } from "./gmail";
-import config from "./config";
 import { renderLiquid } from "./liquid";
-import { storeEmailForViewInBrowser } from "./viewInBrowser";
 import logger from "./logger";
 import {
   constructUnsubscribeHeaders,
@@ -131,6 +131,7 @@ import {
 } from "./types";
 import { UserPropertyAssignments } from "./userProperties";
 import { getUsers } from "./users";
+import { storeEmailForViewInBrowser } from "./viewInBrowser";
 import { isWorkspaceOccupantType } from "./workspaceOccupantSettings";
 
 export function enrichMessageTemplate({
@@ -1498,12 +1499,7 @@ export async function sendEmail({
         headers,
         cc,
         bcc,
-        tags: messageTags
-          ? Object.entries(messageTags).map(([name, value]) => ({
-              name,
-              value,
-            }))
-          : [],
+        tags: messageTags ? encodeResendTags(messageTags) : [],
         attachments: resendAttachments,
       };
 
