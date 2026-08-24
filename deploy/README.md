@@ -34,10 +34,13 @@ The reproducibility is what makes the shortcut sound, so
 
 ## What is patched
 
-`packages/backend-lib/src/destinations/resend.ts` and
-`packages/backend-lib/src/messaging.ts`, on branch
-`deploy/v0.23.0-resend-tags`. This is a backport of `fix/resend-tag-encoding`,
-which targets `main` and is the version to look at for the upstream discussion.
+Three files on branch `deploy/v0.23.0-resend-tags`:
+`packages/backend-lib/src/destinations/resend.ts`,
+`packages/backend-lib/src/messaging.ts`, and
+`packages/api/src/controllers/webhooksController.ts`.
+
+The first two are a backport of `fix/resend-tag-encoding`, which targets `main`
+and is the version to look at for the upstream discussion.
 
 Resend restricts tag names and values to ASCII letters, digits, underscores and
 dashes. Dittofeed passes `messageTags` -- which carries `userId` -- straight
@@ -51,6 +54,19 @@ encoded behind a `dfb64-` sentinel. That matters twice -- `webhooksController`
 reads `tags.workspaceId` off the raw payload before any decoding happens, and
 webhooks for messages sent before the patch still decode to themselves, so
 there is no migration.
+
+The third is separate. A Resend account fans every event out to every endpoint
+configured on it, so instances sharing an account receive each other's events.
+`webhooksController` returned 400 for a workspace it did not recognise, which
+is a delivery failure from the sender's point of view -- and sustained failures
+get the endpoint disabled, silently breaking webhooks for the instance that
+*does* own those events. It now acknowledges unknown workspaces with a 200, the
+same way it already handled events arriving with no `workspaceId` tag at all. A
+workspace that *is* on this instance but has no `webhookKey` still fails loudly,
+since that is a real misconfiguration rather than someone else's traffic.
+
+This matters here because `dittofeed-arcane` and `dittofeed-aiteam` share one
+Resend account, so each was poisoning the other's endpoint.
 
 ## Building
 

@@ -225,13 +225,31 @@ export default async function webhookController(fastify: FastifyInstance) {
         },
       });
 
-      const webhookKey = schemaValidateWithErr(
-        secret?.configValue,
-        ResendSecret,
-      )
+      // A Resend account fans every event out to every endpoint configured on
+      // it, so instances sharing an account receive each other's events. An
+      // event for a workspace this instance has never heard of is not an
+      // error - it simply is not ours. Acknowledge it, the same way the
+      // tagless case above already does.
+      //
+      // Returning 4xx here instead makes the sender record a delivery failure,
+      // and sustained failures get the endpoint disabled, which silently
+      // breaks webhooks for the instance that does own those events.
+      if (!secret) {
+        logger().info(
+          {
+            workspaceId,
+          },
+          "Ignoring resend event for a workspace not on this instance.",
+        );
+        return reply.status(200).send();
+      }
+
+      const webhookKey = schemaValidateWithErr(secret.configValue, ResendSecret)
         .map((val) => val.webhookKey)
         .unwrapOr(null);
 
+      // The workspace is ours but its Resend secret carries no webhookKey.
+      // That is a genuine misconfiguration, so it still fails loudly.
       if (!webhookKey) {
         logger().error(
           {

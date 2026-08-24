@@ -37,43 +37,60 @@ COPY ./packages/isomorphic-lib/*.json ./packages/isomorphic-lib/
 COPY ./packages/emailo/*.json ./packages/emailo/
 
 RUN yarn set version 4.1.1
-RUN yarn workspaces focus backend-lib emailo isomorphic-lib
+RUN yarn workspaces focus api backend-lib emailo isomorphic-lib
 
 COPY ./packages/backend-lib/ ./packages/backend-lib
 COPY ./packages/isomorphic-lib/ ./packages/isomorphic-lib
 COPY ./packages/emailo/ ./packages/emailo
+COPY ./packages/api/ ./packages/api
 
 # emailo before isomorphic-lib before backend-lib -- isomorphic-lib's build
 # fails outright if emailo has not been built yet.
 RUN yarn workspace emailo build && \
     yarn workspace isomorphic-lib build && \
-    yarn workspace backend-lib build
+    yarn workspace backend-lib build && \
+    yarn workspace api build
 
 FROM ${BASE_IMAGE} AS runner
 
 ARG APP_VERSION=v0.23.0-resend-tags
 
 COPY --from=builder /service/packages/backend-lib/dist/src /tmp/rebuilt
+COPY --from=builder /service/packages/api/dist/src /tmp/rebuilt-api
 
 RUN set -eu; \
     dist=/service/packages/backend-lib/dist/src; \
+    apidist=/service/packages/api/dist/src; \
     for f in constants.js types.js destinations/sendgrid.js destinations/postmark.js destinations/amazonses.js; do \
       cmp -s "/tmp/rebuilt/$f" "$dist/$f" || { \
-        echo "overlay aborted: rebuilt $f differs from the base image, so this tree no longer reproduces the release build" >&2; \
+        echo "overlay aborted: rebuilt backend-lib/$f differs from the base image, so this tree no longer reproduces the release build" >&2; \
+        exit 1; \
+      }; \
+    done; \
+    for f in buildApp/router.js controllers/contentController.js controllers/settingsController.js; do \
+      cmp -s "/tmp/rebuilt-api/$f" "$apidist/$f" || { \
+        echo "overlay aborted: rebuilt api/$f differs from the base image, so this tree no longer reproduces the release build" >&2; \
         exit 1; \
       }; \
     done; \
     for f in messaging.js destinations/resend.js; do \
       if cmp -s "/tmp/rebuilt/$f" "$dist/$f"; then \
-        echo "overlay aborted: rebuilt $f is identical to the base image, so the fix is not in this build" >&2; \
+        echo "overlay aborted: rebuilt backend-lib/$f is identical to the base image, so the fix is not in this build" >&2; \
         exit 1; \
       fi; \
       cp "/tmp/rebuilt/$f" "$dist/$f"; \
       cp "/tmp/rebuilt/$f.map" "$dist/$f.map"; \
     done; \
+    if cmp -s /tmp/rebuilt-api/controllers/webhooksController.js "$apidist/controllers/webhooksController.js"; then \
+      echo "overlay aborted: rebuilt api/controllers/webhooksController.js is identical to the base image, so the fix is not in this build" >&2; \
+      exit 1; \
+    fi; \
+    cp /tmp/rebuilt-api/controllers/webhooksController.js "$apidist/controllers/webhooksController.js"; \
+    cp /tmp/rebuilt-api/controllers/webhooksController.js.map "$apidist/controllers/webhooksController.js.map"; \
     cp /tmp/rebuilt/destinations/resend.d.ts "$dist/destinations/resend.d.ts"; \
     grep -q encodeResendTags "$dist/destinations/resend.js"; \
     grep -q encodeResendTags "$dist/messaging.js"; \
-    rm -rf /tmp/rebuilt
+    grep -q "not on this instance" "$apidist/controllers/webhooksController.js"; \
+    rm -rf /tmp/rebuilt /tmp/rebuilt-api
 
 ENV APP_VERSION=${APP_VERSION}
