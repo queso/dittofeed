@@ -20,6 +20,9 @@
 #   docker build -f deploy/overlay-lite.Dockerfile -t ghcr.io/queso/dittofeed-lite:v0.23.0-resend-tags .
 
 ARG BASE_IMAGE=dittofeed/dittofeed-lite:v0.23.0
+ARG NODE_IMAGE=node:22.23.4-slim@sha256:de170b39439eb0e5a3444ad7d60b015614a381e10fecae2e30ec9e735122f38d
+
+FROM ${NODE_IMAGE} AS patched-node
 
 FROM node:20.19.5-bullseye AS builder
 
@@ -92,5 +95,14 @@ RUN set -eu; \
     grep -q encodeResendTags "$dist/messaging.js"; \
     grep -q "not on this instance" "$apidist/controllers/webhooksController.js"; \
     rm -rf /tmp/rebuilt /tmp/rebuilt-api
+
+# The v0.23.0 release image runs Node 20.19.5. Node 20 is end-of-life and
+# misses the 2026-10-21 security fixes (Brotli RCE, CVE-2026-111497), so swap
+# in the official Node 22 binary. The nodejs.org build needs glibc >= 2.28 and
+# this Debian 11 base has 2.31. Every native addon in the image (temporal
+# core-bridge, sodium-native, swc) is a Node-API build, so none depends on the
+# Node major version.
+COPY --from=patched-node /usr/local/bin/node /usr/local/bin/node
+RUN test "$(node --version)" = "v22.23.4"
 
 ENV APP_VERSION=${APP_VERSION}
